@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 
 	"eddisonso.com/edd-gateway/internal/k8s"
@@ -87,9 +88,20 @@ func (s *Server) handleSSH(conn net.Conn) {
 	}
 	defer sshConn.Close()
 
-	// Extract container ID from username
-	containerID := sshConn.User()
-	slog.Info("SSH connection", "container", containerID, "client", clientAddr)
+	// Extract container ID and target user from username
+	// Supports formats:
+	//   - "containerid" -> user=root, container=containerid
+	//   - "user.containerid" -> user=user, container=containerid
+	username := sshConn.User()
+	targetUser := "root"
+	containerID := username
+
+	if idx := strings.LastIndex(username, "."); idx != -1 {
+		targetUser = username[:idx]
+		containerID = username[idx+1:]
+	}
+
+	slog.Info("SSH connection", "container", containerID, "user", targetUser, "client", clientAddr)
 
 	// Resolve container
 	container, err := s.router.Resolve(containerID)
@@ -107,7 +119,7 @@ func (s *Server) handleSSH(conn net.Conn) {
 	}
 
 	backendConfig := &ssh.ClientConfig{
-		User:            "root",
+		User:            targetUser,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(clientSigner),
@@ -131,20 +143,44 @@ func (s *Server) handleSSH(conn net.Conn) {
 	go ssh.DiscardRequests(reqs)
 	go ssh.DiscardRequests(backendReqs)
 
+	// Wait for either connection to close
+	done := make(chan struct{}, 2)
+
+	// Wait for client connection to close
+	go func() {
+		sshConn.Wait()
+		slog.Debug("client connection closed")
+		done <- struct{}{}
+	}()
+
+	// Wait for backend connection to close
+	go func() {
+		backendSSH.Wait()
+		slog.Debug("backend connection closed")
+		done <- struct{}{}
+	}()
+
 	// Proxy channels between client and backend
 	go proxyChannels(chans, backendSSH, sshConn, "client->backend")
-	proxyChannels(backendChans, sshConn, backendSSH, "backend->client")
+	go proxyChannels(backendChans, sshConn, backendSSH, "backend->client")
+
+	// Wait for either connection to close
+	<-done
+	slog.Debug("SSH session ending", "container", containerID)
+	sshConn.Close()
+	backendSSH.Close()
 }
 
 // proxyChannels forwards SSH channels from source to destination.
+// Returns when all channels are processed.
 func proxyChannels(chans <-chan ssh.NewChannel, dst ssh.Conn, src ssh.Conn, direction string) {
 	for newChan := range chans {
-		go handleChannel(newChan, dst, direction)
+		handleChannel(newChan, dst, src, direction)
 	}
 }
 
-// handleChannel proxies a single SSH channel.
-func handleChannel(newChan ssh.NewChannel, dst ssh.Conn, direction string) {
+// handleChannel proxies a single SSH channel and closes connections when done.
+func handleChannel(newChan ssh.NewChannel, dst ssh.Conn, src ssh.Conn, direction string) {
 	chanType := newChan.ChannelType()
 	extraData := newChan.ExtraData()
 
@@ -165,38 +201,55 @@ func handleChannel(newChan ssh.NewChannel, dst ssh.Conn, direction string) {
 		return
 	}
 
+	// Signal channel for coordinated close
+	done := make(chan struct{}, 4)
+	var closeOnce sync.Once
+	closeFn := func() {
+		closeOnce.Do(func() {
+			slog.Debug("closing channel and connections", "type", chanType)
+			srcChan.Close()
+			dstChan.Close()
+			src.Close()
+			dst.Close()
+			close(done)
+		})
+	}
+
 	// Proxy data bidirectionally
-	var wg sync.WaitGroup
-	wg.Add(2)
-
 	go func() {
-		defer wg.Done()
 		io.Copy(dstChan, srcChan)
-		dstChan.CloseWrite()
+		slog.Debug("client->backend copy done")
+		closeFn()
 	}()
 
 	go func() {
-		defer wg.Done()
 		io.Copy(srcChan, dstChan)
-		srcChan.CloseWrite()
+		slog.Debug("backend->client copy done")
+		closeFn()
 	}()
 
-	// Proxy requests bidirectionally
-	go proxyRequests(srcReqs, dstChan)
-	go proxyRequests(dstReqs, srcChan)
+	// Proxy requests bidirectionally - close on exit-status
+	go proxyRequests(srcReqs, dstChan, closeFn)
+	go proxyRequests(dstReqs, srcChan, closeFn)
 
-	wg.Wait()
+	// Wait for close to be triggered
+	<-done
 }
 
 // proxyRequests forwards SSH channel requests.
-func proxyRequests(reqs <-chan *ssh.Request, dst ssh.Channel) {
+func proxyRequests(reqs <-chan *ssh.Request, dst ssh.Channel, closeChan func()) {
 	for req := range reqs {
-		ok, err := dst.SendRequest(req.Type, req.WantReply, req.Payload)
-		if err != nil {
-			slog.Debug("request forward failed", "type", req.Type, "error", err)
-		}
+		slog.Debug("forwarding request", "type", req.Type)
+		ok, _ := dst.SendRequest(req.Type, req.WantReply, req.Payload)
 		if req.WantReply {
 			req.Reply(ok, nil)
 		}
+		// Close when we receive exit-status (command completed)
+		if req.Type == "exit-status" || req.Type == "exit-signal" {
+			slog.Debug("received exit, closing")
+			closeChan()
+			return
+		}
 	}
+	slog.Debug("request channel closed")
 }
