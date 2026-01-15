@@ -48,15 +48,10 @@ spec:
         app: gateway
     spec:
       serviceAccountName: gateway
-      # Must be on same node as edd-compute to share PVC for compute.db
-      nodeSelector:
-        kubernetes.io/hostname: rp1
       containers:
         - name: gateway
           image: eddisonso/ecloud-gateway:latest
           args:
-            - -compute-db
-            - /data/compute.db
             - -ssh-port
             - "2222"
             - -http-port
@@ -65,6 +60,12 @@ spec:
             - "8443"
             - -log-service
             - log-service:50051
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: DATABASE_URL
           ports:
             - name: ssh
               containerPort: 2222
@@ -75,9 +76,6 @@ spec:
             - name: https
               containerPort: 8443
               protocol: TCP
-          volumeMounts:
-            - name: compute-data
-              mountPath: /data
           resources:
             requests:
               memory: "64Mi"
@@ -95,10 +93,6 @@ spec:
               port: 2222
             initialDelaySeconds: 5
             periodSeconds: 5
-      volumes:
-        - name: compute-data
-          persistentVolumeClaim:
-            claimName: edd-compute-data
 ---
 apiVersion: v1
 kind: Service

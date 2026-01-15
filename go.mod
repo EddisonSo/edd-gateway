@@ -8,7 +8,7 @@ require (
 	k8s.io/api v0.35.0
 	k8s.io/apimachinery v0.35.0
 	k8s.io/client-go v0.35.0
-	modernc.org/sqlite v1.34.5
+	github.com/lib/pq v1.10.9
 )
 
 require (

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/lib/pq"
 )
 
 var (
@@ -28,9 +28,9 @@ type Container struct {
 	Status     string
 }
 
-// New creates a router that reads from the compute service database.
-func New(dbPath string) (*Router, error) {
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
+// New creates a router that reads from the PostgreSQL database.
+func New(connStr string) (*Router, error) {
+	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -65,7 +65,7 @@ func (r *Router) Resolve(containerID string) (*Container, error) {
 	err := r.db.QueryRow(`
 		SELECT id, namespace, external_ip, status
 		FROM containers
-		WHERE id = ? AND status = 'running'
+		WHERE id = $1 AND status = 'running'
 	`, containerID).Scan(&c.ID, &c.Namespace, &externalIP, &c.Status)
 
 	if err == sql.ErrNoRows {

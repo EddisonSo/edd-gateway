@@ -14,7 +14,6 @@ import (
 )
 
 func main() {
-	computeDB := flag.String("compute-db", "/data/compute.db", "Path to compute service database")
 	sshPort := flag.Int("ssh-port", 22, "SSH proxy port")
 	httpPort := flag.Int("http-port", 80, "HTTP proxy port")
 	httpsPort := flag.Int("https-port", 443, "HTTPS/TLS proxy port")
@@ -36,8 +35,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Database connection string from environment
+	dbConnStr := os.Getenv("DATABASE_URL")
+	if dbConnStr == "" {
+		dbConnStr = "postgres://localhost:5432/eddcloud?sslmode=disable"
+	}
+
 	// Router for container lookups
-	r, err := router.New(*computeDB)
+	r, err := router.New(dbConnStr)
 	if err != nil {
 		slog.Error("failed to create router", "error", err)
 		os.Exit(1)
