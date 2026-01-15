@@ -202,7 +202,7 @@ func handleChannel(newChan ssh.NewChannel, dst ssh.Conn, src ssh.Conn, direction
 	}
 
 	// Signal channel for coordinated close
-	done := make(chan struct{}, 4)
+	done := make(chan struct{})
 	var closeOnce sync.Once
 	closeFn := func() {
 		closeOnce.Do(func() {
@@ -215,24 +215,25 @@ func handleChannel(newChan ssh.NewChannel, dst ssh.Conn, src ssh.Conn, direction
 		})
 	}
 
-	// Proxy data bidirectionally
+	// Proxy data bidirectionally - don't close on copy completion
+	// For exec commands, client stdin may be empty but we need to wait for response
 	go func() {
 		io.Copy(dstChan, srcChan)
 		slog.Debug("client->backend copy done")
-		closeFn()
+		// Don't close here - wait for exit-status
 	}()
 
 	go func() {
 		io.Copy(srcChan, dstChan)
 		slog.Debug("backend->client copy done")
-		closeFn()
+		// Don't close here - wait for exit-status
 	}()
 
 	// Proxy requests bidirectionally - close on exit-status
 	go proxyRequests(srcReqs, dstChan, closeFn)
 	go proxyRequests(dstReqs, srcChan, closeFn)
 
-	// Wait for close to be triggered
+	// Wait for close to be triggered by exit-status
 	<-done
 }
 
