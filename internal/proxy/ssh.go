@@ -3,22 +3,19 @@ package proxy
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
-	"os"
 	"sync"
 
+	"eddisonso.com/edd-gateway/internal/k8s"
 	"golang.org/x/crypto/ssh"
 )
 
 var (
-	hostKey       ssh.Signer
-	hostKeyOnce   sync.Once
-	clientKey     ssh.Signer
-	clientKeyOnce sync.Once
+	hostKey     ssh.Signer
+	hostKeyOnce sync.Once
 )
 
 // getHostKey returns the gateway's SSH host key for server authentication.
@@ -40,78 +37,6 @@ func getHostKey() ssh.Signer {
 	return hostKey
 }
 
-// getClientKey returns the gateway's SSH key for authenticating to backends.
-// This key is persisted to /data/gateway_key so it survives restarts.
-func getClientKey() ssh.Signer {
-	clientKeyOnce.Do(func() {
-		keyPath := "/data/gateway_key"
-		pubKeyPath := "/data/gateway_key.pub"
-
-		// Try to load existing key
-		keyData, err := os.ReadFile(keyPath)
-		if err == nil {
-			signer, err := ssh.ParsePrivateKey(keyData)
-			if err == nil {
-				clientKey = signer
-				slog.Info("loaded gateway client key", "fingerprint", ssh.FingerprintSHA256(clientKey.PublicKey()))
-				return
-			}
-			slog.Warn("failed to parse existing key, generating new one", "error", err)
-		}
-
-		// Generate new key
-		pub, priv, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			slog.Error("failed to generate client key", "error", err)
-			return
-		}
-
-		signer, err := ssh.NewSignerFromKey(priv)
-		if err != nil {
-			slog.Error("failed to create client signer", "error", err)
-			return
-		}
-		clientKey = signer
-
-		// Save private key in PEM format
-		privBytes, err := ssh.MarshalPrivateKey(priv, "")
-		if err != nil {
-			slog.Error("failed to marshal private key", "error", err)
-			return
-		}
-		if err := os.WriteFile(keyPath, pem.EncodeToMemory(privBytes), 0600); err != nil {
-			slog.Error("failed to save private key", "error", err)
-			return
-		}
-
-		// Save public key in authorized_keys format
-		sshPub, err := ssh.NewPublicKey(pub)
-		if err != nil {
-			slog.Error("failed to create ssh public key", "error", err)
-			return
-		}
-		pubKeyData := ssh.MarshalAuthorizedKey(sshPub)
-		if err := os.WriteFile(pubKeyPath, pubKeyData, 0644); err != nil {
-			slog.Error("failed to save public key", "error", err)
-			return
-		}
-
-		slog.Info("generated new gateway client key",
-			"fingerprint", ssh.FingerprintSHA256(clientKey.PublicKey()),
-			"pubkey_path", pubKeyPath)
-	})
-	return clientKey
-}
-
-// GetClientPublicKey returns the gateway's public key in authorized_keys format.
-// This is used by the compute service to add to containers.
-func GetClientPublicKey() string {
-	signer := getClientKey()
-	if signer == nil {
-		return ""
-	}
-	return string(ssh.MarshalAuthorizedKey(signer.PublicKey()))
-}
 
 // handleSSH handles SSH connections by extracting the username (container ID)
 // and proxying to the appropriate container.
@@ -127,7 +52,7 @@ func (s *Server) handleSSH(conn net.Conn) {
 	}
 
 	// Get client key for backend auth
-	clientSigner := getClientKey()
+	clientSigner := k8s.GetClientKey()
 	if clientSigner == nil {
 		slog.Error("no client key available", "client", clientAddr)
 		conn.Close()

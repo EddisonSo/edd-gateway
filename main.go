@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"eddisonso.com/edd-gateway/internal/k8s"
 	"eddisonso.com/edd-gateway/internal/proxy"
 	"eddisonso.com/edd-gateway/internal/router"
 	"eddisonso.com/go-gfs/pkg/gfslog"
@@ -28,6 +29,12 @@ func main() {
 	})
 	slog.SetDefault(logger.Logger)
 	defer logger.Close()
+
+	// Initialize SSH client key from K8s Secret
+	if err := k8s.InitClientKey(); err != nil {
+		slog.Error("failed to initialize SSH client key", "error", err)
+		os.Exit(1)
+	}
 
 	// Router for container lookups
 	r, err := router.New(*computeDB)

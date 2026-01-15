@@ -1,3 +1,37 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gateway
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gateway-secret-manager
+  namespace: default
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["gateway-ssh-key"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gateway-secret-manager
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: gateway
+    namespace: default
+roleRef:
+  kind: Role
+  name: gateway-secret-manager
+  apiGroup: rbac.authorization.k8s.io
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,7 +47,8 @@ spec:
       labels:
         app: gateway
     spec:
-      # Must be on same node as edd-compute to share PVC
+      serviceAccountName: gateway
+      # Must be on same node as edd-compute to share PVC for compute.db
       nodeSelector:
         kubernetes.io/hostname: rp1
       containers:
