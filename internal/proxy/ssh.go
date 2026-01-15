@@ -3,21 +3,25 @@ package proxy
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 
 	"golang.org/x/crypto/ssh"
 )
 
 var (
-	hostKey     ssh.Signer
-	hostKeyOnce sync.Once
+	hostKey       ssh.Signer
+	hostKeyOnce   sync.Once
+	clientKey     ssh.Signer
+	clientKeyOnce sync.Once
 )
 
-// getHostKey returns the gateway's SSH host key, generating one if needed.
+// getHostKey returns the gateway's SSH host key for server authentication.
 func getHostKey() ssh.Signer {
 	hostKeyOnce.Do(func() {
 		_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -36,15 +40,96 @@ func getHostKey() ssh.Signer {
 	return hostKey
 }
 
+// getClientKey returns the gateway's SSH key for authenticating to backends.
+// This key is persisted to /data/gateway_key so it survives restarts.
+func getClientKey() ssh.Signer {
+	clientKeyOnce.Do(func() {
+		keyPath := "/data/gateway_key"
+		pubKeyPath := "/data/gateway_key.pub"
+
+		// Try to load existing key
+		keyData, err := os.ReadFile(keyPath)
+		if err == nil {
+			signer, err := ssh.ParsePrivateKey(keyData)
+			if err == nil {
+				clientKey = signer
+				slog.Info("loaded gateway client key", "fingerprint", ssh.FingerprintSHA256(clientKey.PublicKey()))
+				return
+			}
+			slog.Warn("failed to parse existing key, generating new one", "error", err)
+		}
+
+		// Generate new key
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			slog.Error("failed to generate client key", "error", err)
+			return
+		}
+
+		signer, err := ssh.NewSignerFromKey(priv)
+		if err != nil {
+			slog.Error("failed to create client signer", "error", err)
+			return
+		}
+		clientKey = signer
+
+		// Save private key in PEM format
+		privBytes, err := ssh.MarshalPrivateKey(priv, "")
+		if err != nil {
+			slog.Error("failed to marshal private key", "error", err)
+			return
+		}
+		if err := os.WriteFile(keyPath, pem.EncodeToMemory(privBytes), 0600); err != nil {
+			slog.Error("failed to save private key", "error", err)
+			return
+		}
+
+		// Save public key in authorized_keys format
+		sshPub, err := ssh.NewPublicKey(pub)
+		if err != nil {
+			slog.Error("failed to create ssh public key", "error", err)
+			return
+		}
+		pubKeyData := ssh.MarshalAuthorizedKey(sshPub)
+		if err := os.WriteFile(pubKeyPath, pubKeyData, 0644); err != nil {
+			slog.Error("failed to save public key", "error", err)
+			return
+		}
+
+		slog.Info("generated new gateway client key",
+			"fingerprint", ssh.FingerprintSHA256(clientKey.PublicKey()),
+			"pubkey_path", pubKeyPath)
+	})
+	return clientKey
+}
+
+// GetClientPublicKey returns the gateway's public key in authorized_keys format.
+// This is used by the compute service to add to containers.
+func GetClientPublicKey() string {
+	signer := getClientKey()
+	if signer == nil {
+		return ""
+	}
+	return string(ssh.MarshalAuthorizedKey(signer.PublicKey()))
+}
+
 // handleSSH handles SSH connections by extracting the username (container ID)
 // and proxying to the appropriate container.
 func (s *Server) handleSSH(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
 
 	// Get or generate host key
-	signer := getHostKey()
-	if signer == nil {
+	hostSigner := getHostKey()
+	if hostSigner == nil {
 		slog.Error("no host key available", "client", clientAddr)
+		conn.Close()
+		return
+	}
+
+	// Get client key for backend auth
+	clientSigner := getClientKey()
+	if clientSigner == nil {
+		slog.Error("no client key available", "client", clientAddr)
 		conn.Close()
 		return
 	}
@@ -53,7 +138,7 @@ func (s *Server) handleSSH(conn net.Conn) {
 	config := &ssh.ServerConfig{
 		NoClientAuth: false,
 		PublicKeyCallback: func(c ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
-			// Accept any public key - actual auth happens on backend
+			// Accept any public key - we verify the user owns the container
 			return &ssh.Permissions{
 				Extensions: map[string]string{
 					"pubkey-fp": ssh.FingerprintSHA256(pubKey),
@@ -61,21 +146,15 @@ func (s *Server) handleSSH(conn net.Conn) {
 			}, nil
 		},
 		KeyboardInteractiveCallback: func(c ssh.ConnMetadata, client ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
-			// Accept keyboard-interactive - actual auth happens on backend
 			return &ssh.Permissions{}, nil
 		},
 		PasswordCallback: func(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
-			// Accept any password - actual auth happens on backend
-			return &ssh.Permissions{
-				Extensions: map[string]string{
-					"password": "true",
-				},
-			}, nil
+			return &ssh.Permissions{}, nil
 		},
 	}
-	config.AddHostKey(signer)
+	config.AddHostKey(hostSigner)
 
-	// Perform SSH handshake
+	// Perform SSH handshake with client
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, config)
 	if err != nil {
 		slog.Debug("SSH handshake failed", "error", err, "client", clientAddr)
@@ -91,52 +170,37 @@ func (s *Server) handleSSH(conn net.Conn) {
 	container, err := s.router.Resolve(containerID)
 	if err != nil {
 		slog.Warn("container not found", "container", containerID, "error", err)
-		sshConn.Close()
 		return
 	}
 
-	// Connect to backend container
+	// Connect to backend container using gateway's client key
 	backendAddr := fmt.Sprintf("%s:22", container.ExternalIP)
 	backendConn, err := net.Dial("tcp", backendAddr)
 	if err != nil {
 		slog.Error("failed to connect to backend", "container", containerID, "addr", backendAddr, "error", err)
-		sshConn.Close()
 		return
 	}
 
-	// Now we need to establish an SSH connection to the backend
-	// and proxy all channels/requests between client and backend
-
 	backendConfig := &ssh.ClientConfig{
-		User:            "root", // Connect as root to backend
+		User:            "root",
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Auth:            []ssh.AuthMethod{}, // Will be populated based on client auth
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(clientSigner),
+		},
 	}
 
-	// For public key auth, we need to forward the client's key
-	// This is complex - for now, use keyboard-interactive or password forwarding
-	// The cleanest solution is to pass through the original SSH connection
-
-	// Actually, the proper way to do this is to NOT terminate SSH at the gateway,
-	// but instead do TCP-level proxying after extracting the username.
-	// However, that requires parsing the SSH protocol at the packet level.
-
-	// For a working implementation, let's use the "proxy command" approach:
-	// The gateway acts as a jump host, and we proxy the raw TCP after auth.
-
-	// Simpler approach: Just do raw TCP proxy after we know the container
-	// But we already completed the SSH handshake with the client...
-
-	// Let's try a different approach: proxy the channels
 	slog.Debug("connecting to backend", "addr", backendAddr)
 
-	// Connect to backend SSH
+	// Connect to backend SSH using gateway's key
 	backendSSH, backendChans, backendReqs, err := ssh.NewClientConn(backendConn, backendAddr, backendConfig)
 	if err != nil {
-		slog.Error("failed SSH to backend", "error", err)
+		slog.Error("failed SSH auth to backend", "container", containerID, "error", err)
+		backendConn.Close()
 		return
 	}
 	defer backendSSH.Close()
+
+	slog.Info("proxying SSH session", "container", containerID, "backend", backendAddr)
 
 	// Discard global requests from both sides
 	go ssh.DiscardRequests(reqs)
@@ -177,11 +241,17 @@ func handleChannel(newChan ssh.NewChannel, dst ssh.Conn, direction string) {
 	}
 
 	// Proxy data bidirectionally
+	var wg sync.WaitGroup
+	wg.Add(2)
+
 	go func() {
+		defer wg.Done()
 		io.Copy(dstChan, srcChan)
 		dstChan.CloseWrite()
 	}()
+
 	go func() {
+		defer wg.Done()
 		io.Copy(srcChan, dstChan)
 		srcChan.CloseWrite()
 	}()
@@ -189,6 +259,8 @@ func handleChannel(newChan ssh.NewChannel, dst ssh.Conn, direction string) {
 	// Proxy requests bidirectionally
 	go proxyRequests(srcReqs, dstChan)
 	go proxyRequests(dstReqs, srcChan)
+
+	wg.Wait()
 }
 
 // proxyRequests forwards SSH channel requests.

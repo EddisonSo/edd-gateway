@@ -43,7 +43,6 @@ spec:
           volumeMounts:
             - name: compute-data
               mountPath: /data
-              readOnly: true
           resources:
             requests:
               memory: "64Mi"
@@ -65,7 +64,6 @@ spec:
         - name: compute-data
           persistentVolumeClaim:
             claimName: edd-compute-data
-            readOnly: true
 ---
 apiVersion: v1
 kind: Service
