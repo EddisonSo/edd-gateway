@@ -1,0 +1,26 @@
+FROM golang:1.24-bookworm AS builder
+
+WORKDIR /build
+
+# Copy go-gfs dependency
+COPY go-gfs/ ./go-gfs/
+
+# Copy gateway source
+COPY edd-cloud-interface/services/gateway/ ./edd-cloud-interface/services/gateway/
+
+WORKDIR /build/edd-cloud-interface/services/gateway
+
+# Download dependencies and build
+RUN go mod download
+RUN CGO_ENABLED=0 go build -o /gateway .
+
+# Final image
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /gateway /gateway
+
+EXPOSE 22 80 443
+
+ENTRYPOINT ["/gateway"]
