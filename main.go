@@ -17,6 +17,7 @@ func main() {
 	sshPort := flag.Int("ssh-port", 22, "SSH proxy port")
 	httpPort := flag.Int("http-port", 80, "HTTP proxy port")
 	httpsPort := flag.Int("https-port", 443, "HTTPS/TLS proxy port")
+	fallbackAddr := flag.String("fallback", "", "Fallback upstream for non-container traffic (e.g., 192.168.3.150)")
 	logService := flag.String("log-service", "", "Log service address")
 	flag.Parse()
 
@@ -50,7 +51,7 @@ func main() {
 	defer r.Close()
 
 	// Create proxy server
-	srv := proxy.NewServer(r)
+	srv := proxy.NewServer(r, *fallbackAddr)
 
 	// Start listeners
 	go func() {

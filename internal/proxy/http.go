@@ -61,15 +61,22 @@ func (s *Server) handleHTTP(conn net.Conn) {
 
 	// Resolve container from hostname
 	container, err := s.router.ResolveByHostname(hostname)
-	if err != nil {
-		slog.Warn("container not found for Host", "host", hostname, "error", err)
-		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nContainer not found\r\n"))
-		conn.Close()
-		return
-	}
 
-	// Connect to backend (using port 80 for HTTP)
-	backendAddr := fmt.Sprintf("%s:80", container.ExternalIP)
+	var backendAddr string
+	if err != nil {
+		// Container not found - try fallback upstream
+		if s.fallbackAddr == "" {
+			slog.Warn("container not found and no fallback configured", "host", hostname, "error", err)
+			conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nContainer not found\r\n"))
+			conn.Close()
+			return
+		}
+		slog.Debug("routing to fallback upstream", "host", hostname, "fallback", s.fallbackAddr)
+		backendAddr = fmt.Sprintf("%s:80", s.fallbackAddr)
+	} else {
+		// Connect to container (using port 80 for HTTP)
+		backendAddr = fmt.Sprintf("%s:80", container.ExternalIP)
+	}
 	backend, err := net.Dial("tcp", backendAddr)
 	if err != nil {
 		slog.Error("failed to connect to backend", "host", hostname, "addr", backendAddr, "error", err)

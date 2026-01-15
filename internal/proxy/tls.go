@@ -64,14 +64,21 @@ func (s *Server) handleTLS(conn net.Conn) {
 
 	// Resolve container from SNI hostname
 	container, err := s.router.ResolveByHostname(sni)
-	if err != nil {
-		slog.Warn("container not found for SNI", "sni", sni, "error", err)
-		conn.Close()
-		return
-	}
 
-	// Connect to backend (using port 443 for TLS)
-	backendAddr := fmt.Sprintf("%s:443", container.ExternalIP)
+	var backendAddr string
+	if err != nil {
+		// Container not found - try fallback upstream
+		if s.fallbackAddr == "" {
+			slog.Warn("container not found and no fallback configured", "sni", sni, "error", err)
+			conn.Close()
+			return
+		}
+		slog.Debug("routing to fallback upstream", "sni", sni, "fallback", s.fallbackAddr)
+		backendAddr = fmt.Sprintf("%s:443", s.fallbackAddr)
+	} else {
+		// Connect to container (using port 443 for TLS)
+		backendAddr = fmt.Sprintf("%s:443", container.ExternalIP)
+	}
 	backend, err := net.Dial("tcp", backendAddr)
 	if err != nil {
 		slog.Error("failed to connect to backend", "sni", sni, "addr", backendAddr, "error", err)

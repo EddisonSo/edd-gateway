@@ -13,16 +13,18 @@ import (
 
 // Server handles TCP proxying with protocol detection.
 type Server struct {
-	router    *router.Router
-	listeners []net.Listener
-	mu        sync.Mutex
-	closed    bool
+	router       *router.Router
+	fallbackAddr string // fallback upstream for non-container traffic (e.g., "192.168.3.150")
+	listeners    []net.Listener
+	mu           sync.Mutex
+	closed       bool
 }
 
 // NewServer creates a new proxy server.
-func NewServer(r *router.Router) *Server {
+func NewServer(r *router.Router, fallbackAddr string) *Server {
 	return &Server{
-		router: r,
+		router:       r,
+		fallbackAddr: fallbackAddr,
 	}
 }
 

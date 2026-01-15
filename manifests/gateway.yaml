@@ -58,6 +58,8 @@ spec:
             - "8080"
             - -https-port
             - "8443"
+            - -fallback
+            - "192.168.3.150"
             - -log-service
             - log-service:50051
           env:
@@ -101,6 +103,7 @@ metadata:
   namespace: default
 spec:
   type: LoadBalancer
+  loadBalancerIP: 192.168.3.200
   selector:
     app: gateway
   ports:
