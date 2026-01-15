@@ -6,9 +6,9 @@ WORKDIR /build
 COPY go-gfs/ ./go-gfs/
 
 # Copy gateway source
-COPY edd-cloud-interface/services/gateway/ ./edd-cloud-interface/services/gateway/
+COPY edd-gateway/ ./edd-gateway/
 
-WORKDIR /build/edd-cloud-interface/services/gateway
+WORKDIR /build/edd-gateway
 
 # Download dependencies and build
 RUN go mod download
