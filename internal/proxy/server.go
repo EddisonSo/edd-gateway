@@ -43,6 +43,86 @@ func (s *Server) ListenTLS(port int) error {
 	return s.listen(port, s.handleTLS)
 }
 
+// ListenMulti starts a multi-protocol listener that auto-detects SSH/HTTP/TLS.
+func (s *Server) ListenMulti(port int) error {
+	return s.listen(port, s.handleMulti)
+}
+
+// handleMulti detects the protocol from the first bytes and routes accordingly.
+func (s *Server) handleMulti(conn net.Conn) {
+	// Read first few bytes to detect protocol
+	buf := make([]byte, 8)
+	n, err := conn.Read(buf)
+	if err != nil || n == 0 {
+		slog.Debug("failed to read protocol detection bytes", "error", err)
+		conn.Close()
+		return
+	}
+	buf = buf[:n]
+
+	// Wrap connection to replay the peeked bytes
+	peekedConn := &peekedConn{Conn: conn, peeked: buf}
+
+	// Detect protocol
+	switch {
+	case n >= 4 && string(buf[:4]) == "SSH-":
+		slog.Debug("detected SSH protocol")
+		s.handleSSH(peekedConn)
+	case n >= 1 && buf[0] == 0x16:
+		slog.Debug("detected TLS protocol")
+		s.handleTLSWithPeek(peekedConn, buf)
+	case isHTTPMethod(buf):
+		slog.Debug("detected HTTP protocol")
+		s.handleHTTPWithPeek(peekedConn, buf)
+	default:
+		slog.Warn("unknown protocol", "bytes", buf)
+		conn.Close()
+	}
+}
+
+// isHTTPMethod checks if the bytes start with an HTTP method.
+func isHTTPMethod(buf []byte) bool {
+	methods := []string{"GET ", "POST", "PUT ", "HEAD", "DELE", "OPTI", "PATC", "CONN", "TRAC"}
+	if len(buf) < 4 {
+		return false
+	}
+	prefix := string(buf[:4])
+	for _, m := range methods {
+		if prefix == m {
+			return true
+		}
+	}
+	return false
+}
+
+// peekedConn wraps a net.Conn to replay peeked bytes on first read.
+type peekedConn struct {
+	net.Conn
+	peeked []byte
+	offset int
+}
+
+func (c *peekedConn) Read(b []byte) (int, error) {
+	if c.offset < len(c.peeked) {
+		n := copy(b, c.peeked[c.offset:])
+		c.offset += n
+		return n, nil
+	}
+	return c.Conn.Read(b)
+}
+
+// handleTLSWithPeek handles TLS with already-peeked bytes.
+func (s *Server) handleTLSWithPeek(conn net.Conn, peeked []byte) {
+	// The peekedConn will replay the peeked bytes, so just call the normal handler
+	s.handleTLS(conn)
+}
+
+// handleHTTPWithPeek handles HTTP with already-peeked bytes.
+func (s *Server) handleHTTPWithPeek(conn net.Conn, peeked []byte) {
+	// The peekedConn will replay the peeked bytes, so just call the normal handler
+	s.handleHTTP(conn)
+}
+
 func (s *Server) listen(port int, handler func(net.Conn)) error {
 	ln, err := net.Listen("tcp", formatAddr(port))
 	if err != nil {
