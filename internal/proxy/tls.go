@@ -62,14 +62,14 @@ func (s *Server) handleTLS(conn net.Conn) {
 
 	slog.Info("TLS connection", "sni", sni, "client", clientAddr)
 
-	// Resolve container from SNI hostname
-	container, err := s.router.ResolveByHostname(sni)
+	// Resolve container from SNI hostname (checks HTTPS access is enabled)
+	container, err := s.router.ResolveHTTPS(sni)
 
 	var backendAddr string
 	if err != nil {
-		// Container not found - try fallback upstream
+		// Container not found or HTTPS blocked - try fallback upstream
 		if s.fallbackAddr == "" {
-			slog.Warn("container not found and no fallback configured", "sni", sni, "error", err)
+			slog.Warn("container not found or HTTPS blocked", "sni", sni, "error", err)
 			conn.Close()
 			return
 		}

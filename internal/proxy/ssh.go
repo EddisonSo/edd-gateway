@@ -103,10 +103,10 @@ func (s *Server) handleSSH(conn net.Conn) {
 
 	slog.Info("SSH connection", "container", containerID, "user", targetUser, "client", clientAddr)
 
-	// Resolve container
-	container, err := s.router.Resolve(containerID)
+	// Resolve container (checks SSH access is enabled)
+	container, err := s.router.ResolveSSH(containerID)
 	if err != nil {
-		slog.Warn("container not found", "container", containerID, "error", err)
+		slog.Warn("container not found or SSH blocked", "container", containerID, "error", err)
 		return
 	}
 
