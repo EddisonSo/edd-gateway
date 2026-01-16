@@ -73,15 +73,9 @@ func main() {
 		}
 	}()
 
-	// Start listeners for all configured ingress ports (from database)
-	ingressPorts := r.GetAllIngressPorts()
-	for _, port := range ingressPorts {
-		// Skip standard ports we already listen on
-		if port == *httpPort || port == *httpsPort || port == *sshPort {
-			continue
-		}
-		// Start a multi-protocol listener that auto-detects HTTP/TLS
-		p := port // capture for goroutine
+	// Start multi-protocol listeners on all allowed ingress ports (8000-8999)
+	for port := 8000; port <= 8999; port++ {
+		p := port
 		go func() {
 			if err := srv.ListenMulti(p); err != nil {
 				slog.Error("multi listener failed", "port", p, "error", err)
@@ -89,7 +83,7 @@ func main() {
 		}()
 	}
 
-	slog.Info("gateway started", "ssh", *sshPort, "http", *httpPort, "https", *httpsPort, "ingress_ports", ingressPorts)
+	slog.Info("gateway started", "ssh", *sshPort, "http", *httpPort, "https", *httpsPort, "extra_ports", "8000-8999")
 
 	// Wait for shutdown
 	sigChan := make(chan os.Signal, 1)
