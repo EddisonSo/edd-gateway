@@ -59,11 +59,21 @@ func (s *Server) handleHTTP(conn net.Conn) {
 
 	slog.Info("HTTP connection", "host", hostname, "client", clientAddr)
 
-	// HTTP is not routed to containers - always go to fallback
-	// Users should use HTTPS for container access
+	// Check if this is a container with HTTPS enabled - redirect to HTTPS
+	container, err := s.router.ResolveHTTPS(hostname)
+	if err == nil && container != nil {
+		// Container found with HTTPS enabled - send 301 redirect
+		slog.Debug("redirecting HTTP to HTTPS", "host", hostname)
+		redirect := fmt.Sprintf("HTTP/1.1 301 Moved Permanently\r\nLocation: https://%s/\r\nConnection: close\r\n\r\n", host)
+		conn.Write([]byte(redirect))
+		conn.Close()
+		return
+	}
+
+	// Not a container or HTTPS not enabled - go to fallback
 	var backendAddr string
 	if s.fallbackAddr == "" {
-		slog.Warn("HTTP not supported for containers, no fallback configured", "host", hostname)
+		slog.Warn("HTTP not supported, no fallback configured", "host", hostname)
 		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nHTTP not supported, use HTTPS\r\n"))
 		conn.Close()
 		return
