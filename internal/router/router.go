@@ -30,13 +30,13 @@ type Router struct {
 
 // Container holds routing information for a container.
 type Container struct {
-	ID             string
-	Namespace      string
-	ExternalIP     string
-	Status         string
-	SSHEnabled     bool
-	HTTPSEnabled   bool
-	HTTPTargetPort int // Target port for HTTP routing (from ingress rule port 80)
+	ID           string
+	Namespace    string
+	ExternalIP   string
+	Status       string
+	SSHEnabled   bool
+	HTTPSEnabled bool
+	PortMap      map[int]int // ingress port -> target port
 }
 
 // New creates a router with in-memory cache backed by PostgreSQL.
@@ -75,12 +75,12 @@ func New(connStr string) (*Router, error) {
 
 // loadAll loads all running containers from the database into memory.
 func (r *Router) loadAll() error {
+	// Load containers
 	rows, err := r.db.Query(`
-		SELECT c.id, c.namespace, c.external_ip, c.status,
-		       COALESCE(c.ssh_enabled, false), COALESCE(c.https_enabled, false),
-		       COALESCE((SELECT target_port FROM ingress_rules WHERE container_id = c.id ORDER BY port LIMIT 1), 0)
-		FROM containers c
-		WHERE c.status = 'running' AND c.external_ip IS NOT NULL AND c.external_ip != ''
+		SELECT id, namespace, external_ip, status,
+		       COALESCE(ssh_enabled, false), COALESCE(https_enabled, false)
+		FROM containers
+		WHERE status = 'running' AND external_ip IS NOT NULL AND external_ip != ''
 	`)
 	if err != nil {
 		return fmt.Errorf("query containers: %w", err)
@@ -93,16 +93,37 @@ func (r *Router) loadAll() error {
 		var c Container
 		var externalIP sql.NullString
 		if err := rows.Scan(&c.ID, &c.Namespace, &externalIP, &c.Status,
-			&c.SSHEnabled, &c.HTTPSEnabled, &c.HTTPTargetPort); err != nil {
+			&c.SSHEnabled, &c.HTTPSEnabled); err != nil {
 			return fmt.Errorf("scan container: %w", err)
 		}
 		if externalIP.Valid && externalIP.String != "" {
 			c.ExternalIP = externalIP.String
+			c.PortMap = make(map[int]int)
 			newCache[c.ID] = &c
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate containers: %w", err)
+	}
+
+	// Load ingress rules for all containers
+	ruleRows, err := r.db.Query(`
+		SELECT container_id, port, target_port FROM ingress_rules
+	`)
+	if err != nil {
+		return fmt.Errorf("query ingress rules: %w", err)
+	}
+	defer ruleRows.Close()
+
+	for ruleRows.Next() {
+		var containerID string
+		var port, targetPort int
+		if err := ruleRows.Scan(&containerID, &port, &targetPort); err != nil {
+			return fmt.Errorf("scan ingress rule: %w", err)
+		}
+		if c, exists := newCache[containerID]; exists {
+			c.PortMap[port] = targetPort
+		}
 	}
 
 	// Clear old entries and add new ones
@@ -220,14 +241,33 @@ func (r *Router) ResolveHTTPS(hostname string) (*Container, error) {
 	return c, nil
 }
 
-// ResolveHTTP resolves a container by hostname and checks HTTP access is enabled.
-func (r *Router) ResolveHTTP(hostname string) (*Container, error) {
+// ResolveHTTP resolves a container by hostname for a given ingress port.
+// Returns the container and target port if the ingress port is configured.
+func (r *Router) ResolveHTTP(hostname string, ingressPort int) (*Container, int, error) {
 	c, err := r.ResolveByHostname(hostname)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if c.HTTPTargetPort == 0 {
-		return nil, ErrProtocolBlocked
+	targetPort, ok := c.PortMap[ingressPort]
+	if !ok {
+		return nil, 0, ErrProtocolBlocked
 	}
-	return c, nil
+	return c, targetPort, nil
+}
+
+// GetAllIngressPorts returns all unique ingress ports configured across all containers.
+func (r *Router) GetAllIngressPorts() []int {
+	portSet := make(map[int]bool)
+	r.cache.Range(func(key, value any) bool {
+		c := value.(*Container)
+		for port := range c.PortMap {
+			portSet[port] = true
+		}
+		return true
+	})
+	ports := make([]int, 0, len(portSet))
+	for port := range portSet {
+		ports = append(ports, port)
+	}
+	return ports
 }

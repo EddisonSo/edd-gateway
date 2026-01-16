@@ -53,13 +53,14 @@ func main() {
 	// Create proxy server
 	srv := proxy.NewServer(r, *fallbackAddr)
 
-	// Start listeners
+	// Start SSH listener
 	go func() {
 		if err := srv.ListenSSH(*sshPort); err != nil {
 			slog.Error("SSH listener failed", "error", err)
 		}
 	}()
 
+	// Start standard HTTP/TLS listeners
 	go func() {
 		if err := srv.ListenHTTP(*httpPort); err != nil {
 			slog.Error("HTTP listener failed", "error", err)
@@ -72,7 +73,23 @@ func main() {
 		}
 	}()
 
-	slog.Info("gateway started", "ssh", *sshPort, "http", *httpPort, "https", *httpsPort)
+	// Start listeners for all configured ingress ports (from database)
+	ingressPorts := r.GetAllIngressPorts()
+	for _, port := range ingressPorts {
+		// Skip standard ports we already listen on
+		if port == *httpPort || port == *httpsPort || port == *sshPort {
+			continue
+		}
+		// Start a multi-protocol listener that auto-detects HTTP/TLS
+		p := port // capture for goroutine
+		go func() {
+			if err := srv.ListenMulti(p); err != nil {
+				slog.Error("multi listener failed", "port", p, "error", err)
+			}
+		}()
+	}
+
+	slog.Info("gateway started", "ssh", *sshPort, "http", *httpPort, "https", *httpsPort, "ingress_ports", ingressPorts)
 
 	// Wait for shutdown
 	sigChan := make(chan os.Signal, 1)

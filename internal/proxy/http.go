@@ -57,25 +57,31 @@ func (s *Server) handleHTTP(conn net.Conn) {
 		hostname = host[:idx]
 	}
 
-	slog.Info("HTTP connection", "host", hostname, "client", clientAddr)
+	// Get the ingress port from the connection's local address
+	ingressPort := 80
+	if addr, ok := conn.LocalAddr().(*net.TCPAddr); ok {
+		ingressPort = addr.Port
+	}
+
+	slog.Info("HTTP connection", "host", hostname, "port", ingressPort, "client", clientAddr)
 
 	// Try to resolve container for HTTP routing
 	var backendAddr string
-	container, err := s.router.ResolveHTTP(hostname)
+	container, targetPort, err := s.router.ResolveHTTP(hostname, ingressPort)
 	if err != nil {
 		// Not a container request, route to fallback
 		if s.fallbackAddr == "" {
-			slog.Warn("no fallback configured", "host", hostname)
+			slog.Warn("no fallback configured", "host", hostname, "port", ingressPort)
 			conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nNo backend available\r\n"))
 			conn.Close()
 			return
 		}
 		slog.Debug("routing HTTP to fallback upstream", "host", hostname, "fallback", s.fallbackAddr)
-		backendAddr = fmt.Sprintf("%s:80", s.fallbackAddr)
+		backendAddr = fmt.Sprintf("%s:%d", s.fallbackAddr, ingressPort)
 	} else {
-		// Route to container's HTTP target port
-		backendAddr = fmt.Sprintf("lb.%s.svc.cluster.local:%d", container.Namespace, container.HTTPTargetPort)
-		slog.Info("routing HTTP to container", "host", hostname, "container", container.ID, "backend", backendAddr)
+		// Route to container's target port
+		backendAddr = fmt.Sprintf("lb.%s.svc.cluster.local:%d", container.Namespace, targetPort)
+		slog.Info("routing HTTP to container", "host", hostname, "container", container.ID, "port", ingressPort, "target", targetPort, "backend", backendAddr)
 	}
 	backend, err := net.Dial("tcp", backendAddr)
 	if err != nil {
