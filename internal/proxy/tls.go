@@ -65,6 +65,10 @@ func (s *Server) handleTLS(conn net.Conn) {
 	if addr, ok := conn.LocalAddr().(*net.TCPAddr); ok {
 		ingressPort = addr.Port
 	}
+	// Normalize internal port to external port
+	if ingressPort == 8443 {
+		ingressPort = 443
+	}
 
 	slog.Info("TLS connection", "sni", sni, "port", ingressPort, "client", clientAddr)
 

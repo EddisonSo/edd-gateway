@@ -62,6 +62,10 @@ func (s *Server) handleHTTP(conn net.Conn) {
 	if addr, ok := conn.LocalAddr().(*net.TCPAddr); ok {
 		ingressPort = addr.Port
 	}
+	// Normalize internal ports to external ports
+	if ingressPort == 8080 {
+		ingressPort = 80
+	}
 
 	slog.Info("HTTP connection", "host", hostname, "port", ingressPort, "client", clientAddr)
 
