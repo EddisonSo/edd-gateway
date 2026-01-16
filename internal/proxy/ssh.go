@@ -110,8 +110,9 @@ func (s *Server) handleSSH(conn net.Conn) {
 		return
 	}
 
-	// Connect to backend container using gateway's client key
-	backendAddr := fmt.Sprintf("%s:22", container.ExternalIP)
+	// Connect to backend container using Kubernetes service DNS
+	// Use internal service name instead of external IP for in-cluster routing
+	backendAddr := fmt.Sprintf("lb.%s.svc.cluster.local:22", container.Namespace)
 	backendConn, err := net.Dial("tcp", backendAddr)
 	if err != nil {
 		slog.Error("failed to connect to backend", "container", containerID, "addr", backendAddr, "error", err)
