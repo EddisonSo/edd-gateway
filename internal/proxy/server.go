@@ -180,13 +180,17 @@ func proxy(client, backend net.Conn, initialData []byte) {
 
 	go func() {
 		io.Copy(backend, client)
-		backend.(*net.TCPConn).CloseWrite()
+		if tc, ok := backend.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
 		done <- struct{}{}
 	}()
 
 	go func() {
 		io.Copy(client, backend)
-		client.(*net.TCPConn).CloseWrite()
+		if tc, ok := client.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
 		done <- struct{}{}
 	}()
 
