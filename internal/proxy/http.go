@@ -59,17 +59,24 @@ func (s *Server) handleHTTP(conn net.Conn) {
 
 	slog.Info("HTTP connection", "host", hostname, "client", clientAddr)
 
-	// HTTP is not routed to containers - always go to fallback
-	// Users should use HTTPS for container access
+	// Try to resolve container for HTTP routing
 	var backendAddr string
-	if s.fallbackAddr == "" {
-		slog.Warn("HTTP not supported for containers, no fallback configured", "host", hostname)
-		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nHTTP not supported, use HTTPS\r\n"))
-		conn.Close()
-		return
+	container, err := s.router.ResolveHTTP(hostname)
+	if err != nil {
+		// Not a container request, route to fallback
+		if s.fallbackAddr == "" {
+			slog.Warn("no fallback configured", "host", hostname)
+			conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nNo backend available\r\n"))
+			conn.Close()
+			return
+		}
+		slog.Debug("routing HTTP to fallback upstream", "host", hostname, "fallback", s.fallbackAddr)
+		backendAddr = fmt.Sprintf("%s:80", s.fallbackAddr)
+	} else {
+		// Route to container's HTTP target port
+		backendAddr = fmt.Sprintf("lb.%s.svc.cluster.local:%d", container.Namespace, container.HTTPTargetPort)
+		slog.Info("routing HTTP to container", "host", hostname, "container", container.ID, "backend", backendAddr)
 	}
-	slog.Debug("routing HTTP to fallback upstream", "host", hostname, "fallback", s.fallbackAddr)
-	backendAddr = fmt.Sprintf("%s:80", s.fallbackAddr)
 	backend, err := net.Dial("tcp", backendAddr)
 	if err != nil {
 		slog.Error("failed to connect to backend", "host", hostname, "addr", backendAddr, "error", err)

@@ -76,8 +76,12 @@ func (s *Server) handleTLS(conn net.Conn) {
 		slog.Debug("routing to fallback upstream", "sni", sni, "fallback", s.fallbackAddr)
 		backendAddr = fmt.Sprintf("%s:443", s.fallbackAddr)
 	} else {
-		// Connect to container using Kubernetes service DNS
-		backendAddr = fmt.Sprintf("lb.%s.svc.cluster.local:443", container.Namespace)
+		// Connect to container using Kubernetes service DNS and configured target port
+		port := 443
+		if container.HTTPTargetPort > 0 {
+			port = container.HTTPTargetPort
+		}
+		backendAddr = fmt.Sprintf("lb.%s.svc.cluster.local:%d", container.Namespace, port)
 	}
 	backend, err := net.Dial("tcp", backendAddr)
 	if err != nil {

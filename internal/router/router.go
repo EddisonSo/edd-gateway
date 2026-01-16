@@ -30,12 +30,13 @@ type Router struct {
 
 // Container holds routing information for a container.
 type Container struct {
-	ID           string
-	Namespace    string
-	ExternalIP   string
-	Status       string
-	SSHEnabled   bool
-	HTTPSEnabled bool
+	ID             string
+	Namespace      string
+	ExternalIP     string
+	Status         string
+	SSHEnabled     bool
+	HTTPSEnabled   bool
+	HTTPTargetPort int // Target port for HTTP routing (from ingress rule port 80)
 }
 
 // New creates a router with in-memory cache backed by PostgreSQL.
@@ -75,10 +76,11 @@ func New(connStr string) (*Router, error) {
 // loadAll loads all running containers from the database into memory.
 func (r *Router) loadAll() error {
 	rows, err := r.db.Query(`
-		SELECT id, namespace, external_ip, status,
-		       COALESCE(ssh_enabled, false), COALESCE(https_enabled, false)
-		FROM containers
-		WHERE status = 'running' AND external_ip IS NOT NULL AND external_ip != ''
+		SELECT c.id, c.namespace, c.external_ip, c.status,
+		       COALESCE(c.ssh_enabled, false), COALESCE(c.https_enabled, false),
+		       COALESCE((SELECT target_port FROM ingress_rules WHERE container_id = c.id ORDER BY port LIMIT 1), 0)
+		FROM containers c
+		WHERE c.status = 'running' AND c.external_ip IS NOT NULL AND c.external_ip != ''
 	`)
 	if err != nil {
 		return fmt.Errorf("query containers: %w", err)
@@ -91,7 +93,7 @@ func (r *Router) loadAll() error {
 		var c Container
 		var externalIP sql.NullString
 		if err := rows.Scan(&c.ID, &c.Namespace, &externalIP, &c.Status,
-			&c.SSHEnabled, &c.HTTPSEnabled); err != nil {
+			&c.SSHEnabled, &c.HTTPSEnabled, &c.HTTPTargetPort); err != nil {
 			return fmt.Errorf("scan container: %w", err)
 		}
 		if externalIP.Valid && externalIP.String != "" {
@@ -213,6 +215,18 @@ func (r *Router) ResolveHTTPS(hostname string) (*Container, error) {
 		return nil, err
 	}
 	if !c.HTTPSEnabled {
+		return nil, ErrProtocolBlocked
+	}
+	return c, nil
+}
+
+// ResolveHTTP resolves a container by hostname and checks HTTP access is enabled.
+func (r *Router) ResolveHTTP(hostname string) (*Container, error) {
+	c, err := r.ResolveByHostname(hostname)
+	if err != nil {
+		return nil, err
+	}
+	if c.HTTPTargetPort == 0 {
 		return nil, ErrProtocolBlocked
 	}
 	return c, nil
