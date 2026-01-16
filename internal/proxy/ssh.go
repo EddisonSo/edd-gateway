@@ -207,11 +207,11 @@ func handleChannel(newChan ssh.NewChannel, dst ssh.Conn, src ssh.Conn, direction
 	var closeOnce sync.Once
 	closeFn := func() {
 		closeOnce.Do(func() {
-			slog.Debug("closing channel and connections", "type", chanType)
+			slog.Debug("closing channel", "type", chanType)
 			srcChan.Close()
 			dstChan.Close()
-			src.Close()
-			dst.Close()
+			// Don't close the entire SSH connection - only close the channel
+			// The connection should stay open for interactive sessions
 			close(done)
 		})
 	}
