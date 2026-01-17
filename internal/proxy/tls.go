@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 )
 
 // handleTLS handles TLS connections by extracting SNI (Server Name Indication)
@@ -78,7 +79,14 @@ func (s *Server) handleTLS(conn net.Conn) {
 	if ingressPort == 443 {
 		container, err := s.router.ResolveHTTPS(sni)
 		if err != nil {
-			// Container not found or HTTPS blocked - try fallback upstream
+			// Check if this is a container hostname (*.compute.eddisonso.com)
+			// If so, don't fallback - just drop the connection
+			if strings.Contains(sni, ".compute.") {
+				slog.Warn("container HTTPS not enabled", "sni", sni, "error", err)
+				conn.Close()
+				return
+			}
+			// Non-container hostname - try fallback upstream
 			if s.fallbackAddr == "" {
 				slog.Warn("container not found or HTTPS blocked", "sni", sni, "error", err)
 				conn.Close()
