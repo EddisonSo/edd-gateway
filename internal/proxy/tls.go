@@ -75,45 +75,29 @@ func (s *Server) handleTLS(conn net.Conn) {
 
 	var backendAddr string
 
-	// For standard HTTPS port, use ResolveHTTPS. For other ports, use ResolveHTTP with PortMap.
-	if ingressPort == 443 {
-		container, err := s.router.ResolveHTTPS(sni)
-		if err != nil {
-			// Check if this is a container hostname (*.compute.eddisonso.com)
-			// If so, don't fallback - just drop the connection
-			if strings.Contains(sni, ".compute.") {
-				slog.Warn("container HTTPS not enabled", "sni", sni, "error", err)
-				conn.Close()
-				return
-			}
-			// Non-container hostname - try fallback upstream
-			if s.fallbackAddr == "" {
-				slog.Warn("container not found or HTTPS blocked", "sni", sni, "error", err)
-				conn.Close()
-				return
-			}
-			slog.Debug("routing to fallback upstream", "sni", sni, "fallback", s.fallbackAddr)
-			backendAddr = fmt.Sprintf("%s:443", s.fallbackAddr)
-		} else {
-			// Connect to container using Kubernetes service DNS on port 443
-			backendAddr = fmt.Sprintf("lb.%s.svc.cluster.local:443", container.Namespace)
-		}
-	} else {
-		// For non-443 ports, use port-based routing
+	// Check if this is a container hostname (*.compute.eddisonso.com)
+	isContainerHostname := strings.Contains(sni, ".compute.")
+
+	if isContainerHostname {
+		// For container hostnames, check ingress rules for the port
 		container, targetPort, err := s.router.ResolveHTTP(sni, ingressPort)
 		if err != nil {
-			// Container not found or port not configured - try fallback upstream
-			if s.fallbackAddr == "" {
-				slog.Warn("container not found or port not configured", "sni", sni, "port", ingressPort, "error", err)
-				conn.Close()
-				return
-			}
-			slog.Debug("routing to fallback upstream", "sni", sni, "port", ingressPort, "fallback", s.fallbackAddr)
-			backendAddr = fmt.Sprintf("%s:%d", s.fallbackAddr, ingressPort)
-		} else {
-			backendAddr = fmt.Sprintf("lb.%s.svc.cluster.local:%d", container.Namespace, targetPort)
-			slog.Info("routing TLS to container", "sni", sni, "port", ingressPort, "target", targetPort)
+			// No ingress rule for this port - drop connection
+			slog.Warn("no ingress rule for port", "sni", sni, "port", ingressPort, "error", err)
+			conn.Close()
+			return
 		}
+		backendAddr = fmt.Sprintf("lb.%s.svc.cluster.local:%d", container.Namespace, targetPort)
+		slog.Info("routing TLS to container", "sni", sni, "port", ingressPort, "target", targetPort)
+	} else {
+		// Non-container hostname - route to fallback upstream
+		if s.fallbackAddr == "" {
+			slog.Warn("no fallback configured for non-container hostname", "sni", sni)
+			conn.Close()
+			return
+		}
+		slog.Debug("routing to fallback upstream", "sni", sni, "port", ingressPort, "fallback", s.fallbackAddr)
+		backendAddr = fmt.Sprintf("%s:%d", s.fallbackAddr, ingressPort)
 	}
 	backend, err := net.Dial("tcp", backendAddr)
 	if err != nil {
