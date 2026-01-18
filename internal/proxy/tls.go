@@ -149,7 +149,7 @@ func (s *Server) handleTerminatedHTTP(conn net.Conn, sni string) {
 		}
 		if headerBuf.Len() > 16384 {
 			slog.Warn("HTTP headers too large", "client", clientAddr)
-			conn.Write([]byte("HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n"))
+			conn.Write([]byte("HTTP/1.1 431 Request Header Fields Too Large\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\n\r\n"))
 			conn.Close()
 			return
 		}
@@ -164,7 +164,7 @@ func (s *Server) handleTerminatedHTTP(conn net.Conn, sni string) {
 	route, targetPath, err := s.router.ResolveStaticRoute(sni, path)
 	if err != nil {
 		slog.Warn("no static route found", "host", sni, "path", path, "error", err)
-		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nNo backend available\r\n"))
+		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\n\r\nNo backend available\r\n"))
 		conn.Close()
 		return
 	}
@@ -174,7 +174,7 @@ func (s *Server) handleTerminatedHTTP(conn net.Conn, sni string) {
 	backend, err := net.DialTimeout("tcp", route.Target, 5*time.Second)
 	if err != nil {
 		slog.Error("failed to connect to backend", "host", sni, "target", route.Target, "error", err)
-		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nBackend connection failed\r\n"))
+		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\n\r\nBackend connection failed\r\n"))
 		conn.Close()
 		return
 	}

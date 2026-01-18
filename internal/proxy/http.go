@@ -47,7 +47,7 @@ func (s *Server) handleHTTP(conn net.Conn) {
 	host := extractHostHeader(headerBuf.String())
 	if host == "" {
 		slog.Warn("no Host header in HTTP request", "client", clientAddr)
-		conn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\nMissing Host header\r\n"))
+		conn.Write([]byte("HTTP/1.1 400 Bad Request\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\n\r\nMissing Host header\r\n"))
 		conn.Close()
 		return
 	}
@@ -94,7 +94,7 @@ func (s *Server) handleHTTP(conn net.Conn) {
 		// 3. Fall back to default upstream
 		if s.fallbackAddr == "" {
 			slog.Warn("no route found", "host", hostname, "path", path, "port", ingressPort)
-			conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nNo backend available\r\n"))
+			conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\n\r\nNo backend available\r\n"))
 			conn.Close()
 			return
 		}
@@ -104,7 +104,7 @@ func (s *Server) handleHTTP(conn net.Conn) {
 	backend, err := net.DialTimeout("tcp", backendAddr, 5*time.Second)
 	if err != nil {
 		slog.Error("failed to connect to backend", "host", hostname, "addr", backendAddr, "error", err)
-		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nBackend connection failed\r\n"))
+		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\n\r\nBackend connection failed\r\n"))
 		conn.Close()
 		return
 	}
