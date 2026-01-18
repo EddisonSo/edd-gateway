@@ -188,3 +188,19 @@ func rewriteRequestPath(headers []byte, oldPath, newPath string) []byte {
 
 	return []byte(newRequestLine + rest)
 }
+
+// addHeader inserts an HTTP header before the final CRLF.
+func addHeader(headers []byte, name, value string) []byte {
+	headerStr := string(headers)
+	// Find the end of headers (double CRLF)
+	idx := strings.Index(headerStr, "\r\n\r\n")
+	if idx == -1 {
+		// Try just \n\n
+		idx = strings.Index(headerStr, "\n\n")
+		if idx == -1 {
+			return headers
+		}
+		return []byte(headerStr[:idx] + "\n" + name + ": " + value + "\n\n")
+	}
+	return []byte(headerStr[:idx] + "\r\n" + name + ": " + value + "\r\n\r\n")
+}

@@ -183,6 +183,9 @@ func (s *Server) handleTerminatedHTTP(conn net.Conn, sni string) {
 		headers = rewriteRequestPath(headers, path, targetPath)
 	}
 
+	// Add X-Forwarded-Proto header for TLS-terminated requests
+	headers = addHeader(headers, "X-Forwarded-Proto", "https")
+
 	// Get buffered data and proxy
 	buffered := make([]byte, reader.Buffered())
 	reader.Read(buffered)
