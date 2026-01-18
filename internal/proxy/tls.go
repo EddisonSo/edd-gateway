@@ -75,15 +75,12 @@ func (s *Server) handleTLS(conn net.Conn) {
 
 	var backendAddr string
 
-	// Try to resolve in order: static routes (host-level) -> container -> fallback
-	// Note: For TLS passthrough, we can only route by SNI hostname, not by path
+	// Try to resolve in order: container -> fallback
+	// Note: Static routes are for HTTP (after TLS termination), not TLS passthrough
+	// TLS passthrough goes to fallback (Traefik) for TLS termination
 
-	// 1. Check static routes (use "/" as path since we can't see the HTTP path in TLS)
-	if route, _, err := s.router.ResolveStaticRoute(sni, "/"); err == nil {
-		backendAddr = route.Target
-		slog.Info("routing TLS via static route", "sni", sni, "target", route.Target)
-	} else if strings.Contains(sni, ".compute.") {
-		// 2. Check if this is a container hostname (*.compute.eddisonso.com)
+	if strings.Contains(sni, ".compute.") {
+		// 1. Check if this is a container hostname (*.compute.eddisonso.com)
 		container, targetPort, err := s.router.ResolveHTTP(sni, ingressPort)
 		if err != nil {
 			// No ingress rule for this port - drop connection
@@ -94,7 +91,7 @@ func (s *Server) handleTLS(conn net.Conn) {
 		backendAddr = fmt.Sprintf("lb.%s.svc.cluster.local:%d", container.Namespace, targetPort)
 		slog.Info("routing TLS to container", "sni", sni, "port", ingressPort, "target", targetPort)
 	} else {
-		// 3. Non-container hostname - route to fallback upstream
+		// 2. Non-container hostname - route to fallback upstream (Traefik for TLS termination)
 		if s.fallbackAddr == "" {
 			slog.Warn("no fallback configured for non-container hostname", "sni", sni)
 			conn.Close()
