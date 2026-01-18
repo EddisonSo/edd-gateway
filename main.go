@@ -11,7 +11,17 @@ import (
 	"eddisonso.com/edd-gateway/internal/proxy"
 	"eddisonso.com/edd-gateway/internal/router"
 	"eddisonso.com/go-gfs/pkg/gfslog"
+	"gopkg.in/yaml.v3"
 )
+
+type routeConfig struct {
+	Routes []struct {
+		Host        string `yaml:"host"`
+		Path        string `yaml:"path"`
+		Target      string `yaml:"target"`
+		StripPrefix bool   `yaml:"strip_prefix"`
+	} `yaml:"routes"`
+}
 
 func main() {
 	sshPort := flag.Int("ssh-port", 22, "SSH proxy port")
@@ -50,25 +60,26 @@ func main() {
 	}
 	defer r.Close()
 
-	// Register test routes for verification
-	testRoutes := []struct {
-		host        string
-		pathPrefix  string
-		target      string
-		stripPrefix bool
-	}{
-		{"cloud-api.eddisonso.com", "/", "simple-file-share-backend:80", false},
-		{"cloud-api.eddisonso.com", "/compute", "edd-compute:80", true},
-		{"cloud-api.eddisonso.com", "/health", "cluster-monitor:80", true},
-		{"cloud-api.eddisonso.com", "/pod-metrics", "cluster-monitor:80", true},
-		{"cloud-api.eddisonso.com", "/ws", "cluster-monitor:80", true},
+	// Load routes from routes.yaml
+	routesFile := os.Getenv("ROUTES_FILE")
+	if routesFile == "" {
+		routesFile = "routes.yaml"
 	}
-	for _, rt := range testRoutes {
-		if err := r.RegisterRoute(rt.host, rt.pathPrefix, rt.target, rt.stripPrefix); err != nil {
-			slog.Warn("failed to register route", "host", rt.host, "path", rt.pathPrefix, "error", err)
+	if data, err := os.ReadFile(routesFile); err == nil {
+		var cfg routeConfig
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			slog.Error("failed to parse routes.yaml", "error", err)
 		} else {
-			slog.Info("registered route", "host", rt.host, "path", rt.pathPrefix, "target", rt.target)
+			for _, rt := range cfg.Routes {
+				if err := r.RegisterRoute(rt.Host, rt.Path, rt.Target, rt.StripPrefix); err != nil {
+					slog.Warn("failed to register route", "host", rt.Host, "path", rt.Path, "error", err)
+				} else {
+					slog.Info("registered route", "host", rt.Host, "path", rt.Path, "target", rt.Target)
+				}
+			}
 		}
+	} else {
+		slog.Debug("no routes.yaml found, skipping static routes", "path", routesFile)
 	}
 
 	// Create proxy server

@@ -1,0 +1,30 @@
+routes:
+  # Default backend for cloud-api
+  - host: cloud-api.eddisonso.com
+    path: /
+    target: simple-file-share-backend:80
+    strip_prefix: false
+
+  # Compute service
+  - host: cloud-api.eddisonso.com
+    path: /compute
+    target: edd-compute:80
+    strip_prefix: true
+
+  # Cluster monitor health endpoint
+  - host: cloud-api.eddisonso.com
+    path: /health
+    target: cluster-monitor:80
+    strip_prefix: true
+
+  # Pod metrics
+  - host: cloud-api.eddisonso.com
+    path: /pod-metrics
+    target: cluster-monitor:80
+    strip_prefix: true
+
+  # WebSocket endpoints
+  - host: cloud-api.eddisonso.com
+    path: /ws
+    target: cluster-monitor:80
+    strip_prefix: true
