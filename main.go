@@ -50,6 +50,27 @@ func main() {
 	}
 	defer r.Close()
 
+	// Register test routes for verification
+	testRoutes := []struct {
+		host        string
+		pathPrefix  string
+		target      string
+		stripPrefix bool
+	}{
+		{"cloud-api.eddisonso.com", "/", "simple-file-share-backend:80", false},
+		{"cloud-api.eddisonso.com", "/compute", "edd-compute:80", true},
+		{"cloud-api.eddisonso.com", "/health", "cluster-monitor:80", true},
+		{"cloud-api.eddisonso.com", "/pod-metrics", "cluster-monitor:80", true},
+		{"cloud-api.eddisonso.com", "/ws", "cluster-monitor:80", true},
+	}
+	for _, rt := range testRoutes {
+		if err := r.RegisterRoute(rt.host, rt.pathPrefix, rt.target, rt.stripPrefix); err != nil {
+			slog.Warn("failed to register route", "host", rt.host, "path", rt.pathPrefix, "error", err)
+		} else {
+			slog.Info("registered route", "host", rt.host, "path", rt.pathPrefix, "target", rt.target)
+		}
+	}
+
 	// Create proxy server
 	srv := proxy.NewServer(r, *fallbackAddr)
 
