@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"time"
 )
 
 // handleHTTP handles HTTP connections by extracting the Host header
@@ -100,7 +101,7 @@ func (s *Server) handleHTTP(conn net.Conn) {
 		slog.Debug("routing HTTP to fallback upstream", "host", hostname, "fallback", s.fallbackAddr)
 		backendAddr = fmt.Sprintf("%s:%d", s.fallbackAddr, ingressPort)
 	}
-	backend, err := net.Dial("tcp", backendAddr)
+	backend, err := net.DialTimeout("tcp", backendAddr, 5*time.Second)
 	if err != nil {
 		slog.Error("failed to connect to backend", "host", hostname, "addr", backendAddr, "error", err)
 		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nBackend connection failed\r\n"))

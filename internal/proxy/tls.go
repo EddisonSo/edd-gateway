@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"time"
 )
 
 // handleTLS handles TLS connections by extracting SNI (Server Name Indication)
@@ -95,7 +96,7 @@ func (s *Server) handleTLS(conn net.Conn) {
 		backendAddr = fmt.Sprintf("%s:%d", s.fallbackAddr, ingressPort)
 	}
 
-	backend, err := net.Dial("tcp", backendAddr)
+	backend, err := net.DialTimeout("tcp", backendAddr, 5*time.Second)
 	if err != nil {
 		slog.Error("failed to connect to backend", "sni", sni, "addr", backendAddr, "error", err)
 		conn.Close()
@@ -168,7 +169,7 @@ func (s *Server) handleTerminatedHTTP(conn net.Conn, sni string) {
 
 	slog.Info("routing via static route", "host", sni, "path", path, "target", route.Target, "targetPath", targetPath)
 
-	backend, err := net.Dial("tcp", route.Target)
+	backend, err := net.DialTimeout("tcp", route.Target, 5*time.Second)
 	if err != nil {
 		slog.Error("failed to connect to backend", "host", sni, "target", route.Target, "error", err)
 		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nBackend connection failed\r\n"))
