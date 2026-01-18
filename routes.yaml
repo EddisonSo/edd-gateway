@@ -9,7 +9,7 @@ routes:
   - host: cloud-api.eddisonso.com
     path: /compute
     target: edd-compute:80
-    strip_prefix: true
+    strip_prefix: false
 
   # Cluster monitor health endpoint
   - host: cloud-api.eddisonso.com
