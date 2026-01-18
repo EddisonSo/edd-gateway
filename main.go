@@ -29,6 +29,8 @@ func main() {
 	httpsPort := flag.Int("https-port", 443, "HTTPS/TLS proxy port")
 	fallbackAddr := flag.String("fallback", "", "Fallback upstream for non-container traffic (e.g., 192.168.3.150)")
 	logService := flag.String("log-service", "", "Log service address")
+	tlsCert := flag.String("tls-cert", "", "TLS certificate file for TLS termination")
+	tlsKey := flag.String("tls-key", "", "TLS private key file for TLS termination")
 	flag.Parse()
 
 	// Logger setup
@@ -84,6 +86,15 @@ func main() {
 
 	// Create proxy server
 	srv := proxy.NewServer(r, *fallbackAddr)
+
+	// Load TLS certificate for termination if provided
+	if *tlsCert != "" && *tlsKey != "" {
+		if err := srv.LoadTLSCert(*tlsCert, *tlsKey); err != nil {
+			slog.Error("failed to load TLS certificate", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("TLS termination enabled")
+	}
 
 	// Start SSH listener
 	go func() {

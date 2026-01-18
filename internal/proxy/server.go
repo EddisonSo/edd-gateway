@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +19,7 @@ type Server struct {
 	listeners    []net.Listener
 	mu           sync.Mutex
 	closed       bool
+	tlsConfig    *tls.Config // TLS config for termination
 }
 
 // NewServer creates a new proxy server.
@@ -26,6 +28,22 @@ func NewServer(r *router.Router, fallbackAddr string) *Server {
 		router:       r,
 		fallbackAddr: fallbackAddr,
 	}
+}
+
+// LoadTLSCert loads a TLS certificate for TLS termination.
+func (s *Server) LoadTLSCert(certFile, keyFile string) error {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return fmt.Errorf("load TLS cert: %w", err)
+	}
+
+	s.tlsConfig = &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+
+	slog.Info("loaded TLS certificate", "cert", certFile)
+	return nil
 }
 
 // ListenSSH starts the SSH proxy listener.

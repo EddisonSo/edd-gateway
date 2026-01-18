@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,19 +12,13 @@ import (
 )
 
 // handleTLS handles TLS connections by extracting SNI (Server Name Indication)
-// from the ClientHello and routing to the appropriate container.
-// The TLS connection is NOT terminated - it's passed through to the backend.
+// from the ClientHello and routing to the appropriate backend.
+// If TLS termination is configured, terminates TLS and uses static routes for HTTP.
+// Otherwise, passes through to backend (container or fallback).
 func (s *Server) handleTLS(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
 
 	// Read ClientHello to extract SNI
-	// TLS record format:
-	// - 1 byte: content type (22 = handshake)
-	// - 2 bytes: version
-	// - 2 bytes: length
-	// - payload
-
-	// Read the TLS record header
 	header := make([]byte, 5)
 	if _, err := readFull(conn, header); err != nil {
 		slog.Debug("failed to read TLS header", "error", err, "client", clientAddr)
@@ -30,14 +26,12 @@ func (s *Server) handleTLS(conn net.Conn) {
 		return
 	}
 
-	// Verify it's a TLS handshake
-	if header[0] != 0x16 { // handshake
+	if header[0] != 0x16 {
 		slog.Warn("not a TLS handshake", "type", header[0], "client", clientAddr)
 		conn.Close()
 		return
 	}
 
-	// Get payload length
 	length := int(header[3])<<8 | int(header[4])
 	if length > 16384 {
 		slog.Warn("TLS record too large", "length", length, "client", clientAddr)
@@ -45,7 +39,6 @@ func (s *Server) handleTLS(conn net.Conn) {
 		return
 	}
 
-	// Read the handshake payload
 	payload := make([]byte, length)
 	if _, err := readFull(conn, payload); err != nil {
 		slog.Debug("failed to read TLS payload", "error", err, "client", clientAddr)
@@ -53,7 +46,6 @@ func (s *Server) handleTLS(conn net.Conn) {
 		return
 	}
 
-	// Parse ClientHello to extract SNI
 	sni, err := extractSNI(payload)
 	if err != nil {
 		slog.Debug("failed to extract SNI", "error", err, "client", clientAddr)
@@ -61,45 +53,48 @@ func (s *Server) handleTLS(conn net.Conn) {
 		return
 	}
 
-	// Get the ingress port from the connection's local address
 	ingressPort := 443
 	if addr, ok := conn.LocalAddr().(*net.TCPAddr); ok {
 		ingressPort = addr.Port
 	}
-	// Normalize internal port to external port
 	if ingressPort == 8443 {
 		ingressPort = 443
 	}
 
 	slog.Info("TLS connection", "sni", sni, "port", ingressPort, "client", clientAddr)
 
+	// Check if we should terminate TLS (have cert + have static routes for this host)
+	if s.tlsConfig != nil && !strings.Contains(sni, ".compute.") {
+		// Check if we have static routes for this hostname
+		if _, _, err := s.router.ResolveStaticRoute(sni, "/"); err == nil {
+			// Terminate TLS and handle as HTTP
+			s.handleTLSTermination(conn, header, payload, sni, clientAddr)
+			return
+		}
+	}
+
+	// TLS passthrough for containers or fallback
 	var backendAddr string
 
-	// Try to resolve in order: container -> fallback
-	// Note: Static routes are for HTTP (after TLS termination), not TLS passthrough
-	// TLS passthrough goes to fallback (Traefik) for TLS termination
-
 	if strings.Contains(sni, ".compute.") {
-		// 1. Check if this is a container hostname (*.compute.eddisonso.com)
 		container, targetPort, err := s.router.ResolveHTTP(sni, ingressPort)
 		if err != nil {
-			// No ingress rule for this port - drop connection
 			slog.Warn("no ingress rule for port", "sni", sni, "port", ingressPort, "error", err)
 			conn.Close()
 			return
 		}
 		backendAddr = fmt.Sprintf("lb.%s.svc.cluster.local:%d", container.Namespace, targetPort)
-		slog.Info("routing TLS to container", "sni", sni, "port", ingressPort, "target", targetPort)
+		slog.Info("TLS passthrough to container", "sni", sni, "port", ingressPort, "target", targetPort)
 	} else {
-		// 2. Non-container hostname - route to fallback upstream (Traefik for TLS termination)
 		if s.fallbackAddr == "" {
-			slog.Warn("no fallback configured for non-container hostname", "sni", sni)
+			slog.Warn("no fallback configured", "sni", sni)
 			conn.Close()
 			return
 		}
-		slog.Debug("routing to fallback upstream", "sni", sni, "port", ingressPort, "fallback", s.fallbackAddr)
+		slog.Debug("TLS passthrough to fallback", "sni", sni, "fallback", s.fallbackAddr)
 		backendAddr = fmt.Sprintf("%s:%d", s.fallbackAddr, ingressPort)
 	}
+
 	backend, err := net.Dial("tcp", backendAddr)
 	if err != nil {
 		slog.Error("failed to connect to backend", "sni", sni, "addr", backendAddr, "error", err)
@@ -107,11 +102,108 @@ func (s *Server) handleTLS(conn net.Conn) {
 		return
 	}
 
-	slog.Debug("proxying TLS to backend", "sni", sni, "backend", backendAddr)
-
-	// Proxy the connection, including the already-read header and payload
 	initialData := append(header, payload...)
 	proxy(conn, backend, initialData)
+}
+
+// handleTLSTermination terminates TLS and handles the decrypted HTTP traffic.
+func (s *Server) handleTLSTermination(rawConn net.Conn, header, payload []byte, sni, clientAddr string) {
+	// Create a connection that replays the already-read ClientHello
+	replayConn := &replayConn{
+		Conn:   rawConn,
+		replay: append(header, payload...),
+	}
+
+	// Wrap with TLS server
+	tlsConn := tls.Server(replayConn, s.tlsConfig)
+	if err := tlsConn.Handshake(); err != nil {
+		slog.Warn("TLS handshake failed", "sni", sni, "error", err, "client", clientAddr)
+		rawConn.Close()
+		return
+	}
+
+	slog.Info("TLS terminated", "sni", sni, "client", clientAddr)
+
+	// Now handle the decrypted connection as HTTP
+	s.handleTerminatedHTTP(tlsConn, sni)
+}
+
+// handleTerminatedHTTP handles HTTP traffic after TLS termination.
+func (s *Server) handleTerminatedHTTP(conn net.Conn, sni string) {
+	clientAddr := conn.RemoteAddr().String()
+	reader := bufio.NewReader(conn)
+
+	var headerBuf bytes.Buffer
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			slog.Debug("failed to read HTTP header after TLS termination", "error", err, "client", clientAddr)
+			conn.Close()
+			return
+		}
+		headerBuf.WriteString(line)
+
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+		if headerBuf.Len() > 16384 {
+			slog.Warn("HTTP headers too large", "client", clientAddr)
+			conn.Write([]byte("HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n"))
+			conn.Close()
+			return
+		}
+	}
+
+	path := extractRequestPath(headerBuf.String())
+	slog.Info("HTTP after TLS termination", "host", sni, "path", path, "client", clientAddr)
+
+	// Use static routes for routing
+	route, targetPath, err := s.router.ResolveStaticRoute(sni, path)
+	if err != nil {
+		slog.Warn("no static route found", "host", sni, "path", path)
+		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nNo backend available\r\n"))
+		conn.Close()
+		return
+	}
+
+	slog.Info("routing via static route", "host", sni, "path", path, "target", route.Target, "targetPath", targetPath)
+
+	backend, err := net.Dial("tcp", route.Target)
+	if err != nil {
+		slog.Error("failed to connect to backend", "host", sni, "target", route.Target, "error", err)
+		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nBackend connection failed\r\n"))
+		conn.Close()
+		return
+	}
+
+	// Rewrite path if strip_prefix is enabled
+	headers := headerBuf.Bytes()
+	if route.StripPrefix && path != targetPath {
+		headers = rewriteRequestPath(headers, path, targetPath)
+	}
+
+	// Get buffered data and proxy
+	buffered := make([]byte, reader.Buffered())
+	reader.Read(buffered)
+	initialData := append(headers, buffered...)
+
+	proxy(conn, backend, initialData)
+}
+
+// replayConn replays buffered data before reading from the underlying connection.
+type replayConn struct {
+	net.Conn
+	replay []byte
+	offset int
+}
+
+func (c *replayConn) Read(b []byte) (int, error) {
+	if c.offset < len(c.replay) {
+		n := copy(b, c.replay[c.offset:])
+		c.offset += n
+		return n, nil
+	}
+	return c.Conn.Read(b)
 }
 
 // extractSNI parses a TLS ClientHello and extracts the SNI hostname.
