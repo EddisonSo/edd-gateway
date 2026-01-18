@@ -67,25 +67,38 @@ func (s *Server) handleHTTP(conn net.Conn) {
 		ingressPort = 80
 	}
 
-	slog.Info("HTTP connection", "host", hostname, "port", ingressPort, "client", clientAddr)
+	// Extract path from request line
+	path := extractRequestPath(headerBuf.String())
 
-	// Try to resolve container for HTTP routing
+	slog.Info("HTTP connection", "host", hostname, "path", path, "port", ingressPort, "client", clientAddr)
+
+	// Try to resolve in order: static routes -> container -> fallback
 	var backendAddr string
-	container, targetPort, err := s.router.ResolveHTTP(hostname, ingressPort)
-	if err != nil {
-		// Not a container request, route to fallback
+	var modifiedHeaders []byte
+
+	// 1. Check static routes first
+	if route, targetPath, err := s.router.ResolveStaticRoute(hostname, path); err == nil {
+		backendAddr = route.Target
+		slog.Info("routing HTTP via static route", "host", hostname, "path", path, "target", route.Target, "targetPath", targetPath)
+
+		// If strip_prefix is enabled, rewrite the request path
+		if route.StripPrefix && path != targetPath {
+			modifiedHeaders = rewriteRequestPath(headerBuf.Bytes(), path, targetPath)
+		}
+	} else if container, targetPort, err := s.router.ResolveHTTP(hostname, ingressPort); err == nil {
+		// 2. Try container routing
+		backendAddr = fmt.Sprintf("lb.%s.svc.cluster.local:%d", container.Namespace, targetPort)
+		slog.Info("routing HTTP to container", "host", hostname, "container", container.ID, "port", ingressPort, "target", targetPort, "backend", backendAddr)
+	} else {
+		// 3. Fall back to default upstream
 		if s.fallbackAddr == "" {
-			slog.Warn("no fallback configured", "host", hostname, "port", ingressPort)
+			slog.Warn("no route found", "host", hostname, "path", path, "port", ingressPort)
 			conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nNo backend available\r\n"))
 			conn.Close()
 			return
 		}
 		slog.Debug("routing HTTP to fallback upstream", "host", hostname, "fallback", s.fallbackAddr)
 		backendAddr = fmt.Sprintf("%s:%d", s.fallbackAddr, ingressPort)
-	} else {
-		// Route to container's target port
-		backendAddr = fmt.Sprintf("lb.%s.svc.cluster.local:%d", container.Namespace, targetPort)
-		slog.Info("routing HTTP to container", "host", hostname, "container", container.ID, "port", ingressPort, "target", targetPort, "backend", backendAddr)
 	}
 	backend, err := net.Dial("tcp", backendAddr)
 	if err != nil {
@@ -101,8 +114,14 @@ func (s *Server) handleHTTP(conn net.Conn) {
 	buffered := make([]byte, reader.Buffered())
 	reader.Read(buffered)
 
+	// Use modified headers if path was rewritten, otherwise use original
+	headers := headerBuf.Bytes()
+	if modifiedHeaders != nil {
+		headers = modifiedHeaders
+	}
+
 	// Combine headers with any buffered body data
-	initialData := append(headerBuf.Bytes(), buffered...)
+	initialData := append(headers, buffered...)
 
 	// Proxy the connection
 	proxy(conn, backend, initialData)
@@ -118,4 +137,53 @@ func extractHostHeader(headers string) string {
 		}
 	}
 	return ""
+}
+
+// extractRequestPath extracts the path from the HTTP request line.
+// "GET /foo/bar HTTP/1.1" -> "/foo/bar"
+func extractRequestPath(headers string) string {
+	// Find the first line (request line)
+	idx := strings.Index(headers, "\n")
+	if idx == -1 {
+		return "/"
+	}
+	requestLine := strings.TrimSpace(headers[:idx])
+
+	// Parse: METHOD PATH HTTP/VERSION
+	parts := strings.SplitN(requestLine, " ", 3)
+	if len(parts) < 2 {
+		return "/"
+	}
+
+	path := parts[1]
+	// Remove query string if present
+	if qIdx := strings.Index(path, "?"); qIdx != -1 {
+		path = path[:qIdx]
+	}
+
+	if path == "" {
+		return "/"
+	}
+	return path
+}
+
+// rewriteRequestPath replaces the path in the HTTP request line.
+func rewriteRequestPath(headers []byte, oldPath, newPath string) []byte {
+	headerStr := string(headers)
+
+	// Find and replace in the request line only (first line)
+	idx := strings.Index(headerStr, "\n")
+	if idx == -1 {
+		return headers
+	}
+
+	requestLine := headerStr[:idx]
+	rest := headerStr[idx:]
+
+	// Replace the path in the request line
+	newRequestLine := strings.Replace(requestLine, " "+oldPath+" ", " "+newPath+" ", 1)
+	// Also handle case where path might have query string
+	newRequestLine = strings.Replace(newRequestLine, " "+oldPath+"?", " "+newPath+"?", 1)
+
+	return []byte(newRequestLine + rest)
 }
