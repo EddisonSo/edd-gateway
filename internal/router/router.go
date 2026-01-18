@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -34,13 +33,14 @@ type StaticRoute struct {
 // Router resolves container IDs to their network addresses.
 // Uses an in-memory cache with periodic sync from PostgreSQL.
 type Router struct {
-	db           *sql.DB
-	cache        sync.Map // containerID -> *Container
-	staticRoutes []StaticRoute
-	routesMu     sync.RWMutex
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
+	db         *sql.DB
+	cache      sync.Map       // containerID -> *Container
+	routeTable *routeTable    // radix tree for path routing
+	routesList []StaticRoute  // flat list for ListRoutes()
+	routesMu   sync.RWMutex
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
 }
 
 // Container holds routing information for a container.
@@ -170,17 +170,17 @@ func (r *Router) loadAll() error {
 
 	slog.Debug("loaded containers into cache", "count", len(newCache))
 
-	// Load static routes
+	// Load static routes into radix tree
 	routeRows, err := r.db.Query(`
 		SELECT id, host, path_prefix, target, strip_prefix, priority
 		FROM static_routes
-		ORDER BY priority DESC, length(path_prefix) DESC
 	`)
 	if err != nil {
 		return fmt.Errorf("query static routes: %w", err)
 	}
 	defer routeRows.Close()
 
+	newTable := newRouteTable()
 	var routes []StaticRoute
 	for routeRows.Next() {
 		var route StaticRoute
@@ -189,13 +189,15 @@ func (r *Router) loadAll() error {
 			return fmt.Errorf("scan static route: %w", err)
 		}
 		routes = append(routes, route)
+		newTable.insert(&routes[len(routes)-1])
 	}
 	if err := routeRows.Err(); err != nil {
 		return fmt.Errorf("iterate static routes: %w", err)
 	}
 
 	r.routesMu.Lock()
-	r.staticRoutes = routes
+	r.routeTable = newTable
+	r.routesList = routes
 	r.routesMu.Unlock()
 
 	slog.Debug("loaded static routes into cache", "count", len(routes))
@@ -381,14 +383,16 @@ func (r *Router) loadStaticRoutes() error {
 	routeRows, err := r.db.Query(`
 		SELECT id, host, path_prefix, target, strip_prefix, priority
 		FROM static_routes
-		ORDER BY priority DESC, length(path_prefix) DESC
 	`)
 	if err != nil {
 		return fmt.Errorf("query static routes: %w", err)
 	}
 	defer routeRows.Close()
 
+	// Build new route table
+	newTable := newRouteTable()
 	var routes []StaticRoute
+
 	for routeRows.Next() {
 		var route StaticRoute
 		if err := routeRows.Scan(&route.ID, &route.Host, &route.PathPrefix,
@@ -396,10 +400,12 @@ func (r *Router) loadStaticRoutes() error {
 			return fmt.Errorf("scan static route: %w", err)
 		}
 		routes = append(routes, route)
+		newTable.insert(&routes[len(routes)-1])
 	}
 
 	r.routesMu.Lock()
-	r.staticRoutes = routes
+	r.routeTable = newTable
+	r.routesList = routes
 	r.routesMu.Unlock()
 
 	slog.Info("reloaded static routes", "count", len(routes))
@@ -407,30 +413,30 @@ func (r *Router) loadStaticRoutes() error {
 }
 
 // ResolveStaticRoute finds a matching static route for the given host and path.
+// Uses radix tree for O(path_length) lookup.
 // Returns the route and the path to use (with prefix stripped if configured).
 func (r *Router) ResolveStaticRoute(host, path string) (*StaticRoute, string, error) {
 	r.routesMu.RLock()
 	defer r.routesMu.RUnlock()
 
-	// Routes are already sorted by priority (longest path first)
-	for i := range r.staticRoutes {
-		route := &r.staticRoutes[i]
-		if route.Host != host {
-			continue
-		}
-		if strings.HasPrefix(path, route.PathPrefix) {
-			targetPath := path
-			if route.StripPrefix && route.PathPrefix != "/" {
-				targetPath = strings.TrimPrefix(path, route.PathPrefix)
-				if targetPath == "" {
-					targetPath = "/"
-				}
-			}
-			return route, targetPath, nil
+	if r.routeTable == nil {
+		return nil, "", ErrNoRoute
+	}
+
+	route, remaining := r.routeTable.lookup(host, path)
+	if route == nil {
+		return nil, "", ErrNoRoute
+	}
+
+	targetPath := path
+	if route.StripPrefix && route.PathPrefix != "/" {
+		targetPath = remaining
+		if targetPath == "" {
+			targetPath = "/"
 		}
 	}
 
-	return nil, "", ErrNoRoute
+	return route, targetPath, nil
 }
 
 // ListRoutes returns all configured static routes.
@@ -439,8 +445,8 @@ func (r *Router) ListRoutes() []StaticRoute {
 	defer r.routesMu.RUnlock()
 
 	// Return a copy to avoid race conditions
-	routes := make([]StaticRoute, len(r.staticRoutes))
-	copy(routes, r.staticRoutes)
+	routes := make([]StaticRoute, len(r.routesList))
+	copy(routes, r.routesList)
 
 	// Sort by host, then path for display
 	sort.Slice(routes, func(i, j int) bool {
