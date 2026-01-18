@@ -1,7 +1,14 @@
 package router
 
+import "log/slog"
+
 // DefaultCacheSize is the default number of recent lookups to cache.
 const DefaultCacheSize = 512
+
+// debugLog is a helper for debug-level logging with key-value pairs.
+func debugLog(msg string, args ...any) {
+	slog.Debug(msg, args...)
+}
 
 // radixNode is a node in the radix tree.
 type radixNode struct {
@@ -214,12 +221,16 @@ func (t *routeTable) lookup(host, path string) (*StaticRoute, string) {
 	// Check cache first
 	cacheKey := host + ":" + path
 	if entry, ok := t.cache.get(cacheKey); ok {
+		debugLog("radix lookup: cache hit", "host", host, "path", path)
 		return entry.route, entry.remaining
 	}
+
+	debugLog("radix lookup: cache miss, traversing tree", "host", host, "path", path)
 
 	// Cache miss - traverse radix tree
 	root, ok := t.hosts[host]
 	if !ok {
+		debugLog("radix lookup: host not found in route table", "host", host, "path", path)
 		return nil, path
 	}
 
@@ -273,6 +284,7 @@ func (t *routeTable) lookup(host, path string) (*StaticRoute, string) {
 	}
 
 	if bestRoute == nil {
+		debugLog("radix lookup: no matching route", "host", host, "path", path)
 		return nil, path
 	}
 
@@ -284,6 +296,8 @@ func (t *routeTable) lookup(host, path string) (*StaticRoute, string) {
 	if remaining == "" {
 		remaining = "/"
 	}
+
+	debugLog("radix lookup: found route", "host", host, "path", path, "matched_prefix", bestRoute.PathPrefix, "target", bestRoute.Target, "remaining", remaining)
 
 	// Add to cache
 	t.cache.put(cacheKey, cacheEntry{route: bestRoute, remaining: remaining})

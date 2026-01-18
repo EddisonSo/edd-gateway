@@ -200,6 +200,10 @@ func (r *Router) loadAll() error {
 	r.routesList = routes
 	r.routesMu.Unlock()
 
+	// Log all loaded routes for debugging
+	for _, route := range routes {
+		slog.Debug("loaded route", "host", route.Host, "path", route.PathPrefix, "target", route.Target, "strip_prefix", route.StripPrefix)
+	}
 	slog.Debug("loaded static routes into cache", "count", len(routes))
 	return nil
 }
@@ -420,13 +424,19 @@ func (r *Router) ResolveStaticRoute(host, path string) (*StaticRoute, string, er
 	defer r.routesMu.RUnlock()
 
 	if r.routeTable == nil {
+		slog.Debug("route resolution: routeTable is nil", "host", host, "path", path)
 		return nil, "", ErrNoRoute
 	}
 
+	slog.Debug("route resolution: looking up", "host", host, "path", path, "known_hosts", len(r.routeTable.hosts))
+
 	route, remaining := r.routeTable.lookup(host, path)
 	if route == nil {
+		slog.Debug("route resolution: no route found", "host", host, "path", path)
 		return nil, "", ErrNoRoute
 	}
+
+	slog.Debug("route resolution: found match", "host", host, "path", path, "matched_prefix", route.PathPrefix, "target", route.Target, "remaining", remaining)
 
 	targetPath := path
 	if route.StripPrefix && route.PathPrefix != "/" {

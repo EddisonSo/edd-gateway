@@ -140,6 +140,16 @@ func extractHostHeader(headers string) string {
 	return ""
 }
 
+// extractRequestLine extracts the first line of the HTTP request.
+// "GET /foo/bar HTTP/1.1\r\n..." -> "GET /foo/bar HTTP/1.1"
+func extractRequestLine(headers string) string {
+	idx := strings.Index(headers, "\n")
+	if idx == -1 {
+		return strings.TrimSpace(headers)
+	}
+	return strings.TrimSpace(headers[:idx])
+}
+
 // extractRequestPath extracts the path from the HTTP request line.
 // "GET /foo/bar HTTP/1.1" -> "/foo/bar"
 func extractRequestPath(headers string) string {
